@@ -35,7 +35,7 @@ const log = {
   let phoneNumber = global.botNumber || ""
   let phoneInput = ""
   const methodCodeQR = process.argv.includes("--qr")
-  const methodCode = !!phoneNumber || process.argv.includes("--code")
+  const methodCode = process.argv.includes("--code")
   const DIGITS = (s = "") => String(s).replace(/\D/g, "");
 
   function normalizePhoneForPairing(input) {
@@ -99,20 +99,22 @@ async function loadBots() {
   await loadBots()
 })()
 
-let opcion
+let opcion;
 if (methodCodeQR) {
-  opcion = "1"
+  opcion = "1";
 } else if (methodCode) {
-  opcion = "2"
+  opcion = "2";
 } else if (!fs.existsSync("./Sessions/Owner/creds.json")) {
-  do {
-    opcion = readlineSync.question(chalk.bold.white("\nSeleccione una opción:\n") + chalk.blueBright("1. Con código QR\n") + chalk.cyan("2. Con código de texto de 8 dígitos\n--> "))
-    if (opcion === "2") {
-      console.log(chalk.bold.redBright(`\nPor favor, Ingrese el número de WhatsApp.\n${chalk.bold.yellowBright("Ejemplo: +57301******")}\n${chalk.bold.magentaBright('---> ')} `))
-      phoneInput = readlineSync.question("")
-      phoneNumber = normalizePhoneForPairing(phoneInput)
-    }
-  } while (opcion !== "1" && opcion !== "2")
+  opcion = readlineSync.question(chalk.bold.white("\nSeleccione una opción:\n") + chalk.blueBright("1. Con código QR\n") + chalk.cyan("2. Con código de texto de 8 dígitos\n--> "));
+  while (!/^[1-2]$/.test(opcion)) {
+    console.log(chalk.bold.redBright(`No se permiten numeros que no sean 1 o 2, tampoco letras o símbolos especiales.`));
+    opcion = readlineSync.question("--> ");
+  }
+  if (opcion === "2") {
+    console.log(chalk.bold.redBright(`\nPor favor, Ingrese el número de WhatsApp.\n${chalk.bold.yellowBright("Ejemplo: +57301******")}\n${chalk.bold.magentaBright('---> ')} `));
+    phoneInput = readlineSync.question("");
+    phoneNumber = normalizePhoneForPairing(phoneInput);
+  }
 }
 
 async function startBot() {
@@ -159,10 +161,12 @@ async function startBot() {
   client.sendMessage(jid, { text: text, ...options }, { quoted })
   client.ev.on("connection.update", async (update) => {
     const { qr, connection, lastDisconnect, isNewLogin, receivedPendingNotifications, } = update
-    if (qr && opcion === "1" && !state.creds.registered) {
-      console.log(chalk.green.bold("[ ✿ ] Escanea este código QR"))
-      qrcode.generate(qr, { small: true })
-    }
+    
+    if (qr != 0 && qr != undefined || methodCodeQR) {
+    if (opcion == '1' || methodCodeQR) {
+      console.log(chalk.green.bold("[ ✿ ] Escanea este código QR"));
+      qrcode.generate(qr, { small: true });
+    }}
 
     if (connection === "close") {
       const reason = lastDisconnect?.error?.output?.statusCode || 0;
