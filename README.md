@@ -28,55 +28,9 @@ Yuki Bot es un bot de WhatsApp multifuncional basado en `baileys`. Este bot ofre
 
 ## Informaciones Importantes
 
-<details>
-<summary><strong>🌴 Configuración de acceso al subbot</strong> — Web</summary>
-
-### 1. Desde Termux (local)
-Web:
-```
-localhost:5010
-```
-
-### 2. Desde un servidor hosting (externo)
-```
-IP_DEL_SERVIDOR:PUERTO
-```
-Ejemplo:
-```
-1.00.00.00:5010
-```
-
-### 3. Ajustar el puerto en el código
-Ir a:
-
-[lib/system/web.js](https://github.com/The-King-Destroy/YukiBot-MD/blob/main/lib%2Fsystem%2Fweb.js)
-
-Linea :: #34
-
-Buscar la línea donde se define el `PORT` y ajustarla al puerto de tu servidor:
-
-```js
-const PORT = process.env.PORT || 5010;
-app.listen(PORT, () => {
-  console.log(`Servidor corriendo en el puerto ${PORT}`);
-});
-```
-
-Si tu hosting usa otro puerto (ej. `8080`):
-```js
-const PORT = process.env.PORT || 8080;
-```
-
-</details>
-
-<details>
-<summary><strong>🌴 Información</strong> — Recomendado</summary>
-
 Evita completamente usar forks, mods o versiones alteradas de Baileys.
 No utilices “baileys mods” ni variantes no oficiales.
 Siempre usa la librería principal y oficial de Baileys.
-
-</details>
 
 ---
 
@@ -268,4 +222,4 @@ cd && cd YukiBot-MD && rm -rf Sessions/Owner && npm start
 [![ZyxlJs](https://github.com/DevZyxlJs.png?size=100)](https://github.com/DevZyxlJs) [![Carlos](https://github.com/AzamiJs.png?size=100)](https://github.com/AzamiJs)
 
 ### 💐 Propietario
-[![King](https://github.com/The-King-Destroy.png?size=120)](https://github.com/The-King-Destroy) 
+[![King](https://github.com/The-King-Destroy.png?size=120)](https://github.com/The-King-Destroy)
