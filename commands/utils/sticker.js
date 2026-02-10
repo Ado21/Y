@@ -66,15 +66,20 @@ export default {
       const pack = marca[0] || texto1
       const author = marca.length > 1 ? marca[1] : texto2
 
+      const sendWebpWithExif = async (webpBuffer) => {
+        const media = { mimetype: 'webp', data: webpBuffer }
+        const metadata = { packname: pack, author, categories: [''] }
+        const stickerPath = await writeExif(media, metadata)
+        await client.sendMessage(m.chat, { sticker: { url: stickerPath } }, { quoted: m })
+        fs.unlinkSync(stickerPath)
+      }
+
       const makeStickerFromImageFile = async (inFile) => {
         const outWebp = tmp(`sticker-${Date.now()}.webp`)
         const vf = buildVF(picked)
 
         await runFfmpeg([
           '-y',
-          '-analyzeduration', '200M',
-          '-probesize', '200M',
-          '-fflags', '+genpts',
           '-i', inFile,
           '-vf', vf,
           '-an',
@@ -89,64 +94,30 @@ export default {
 
         const data = fs.readFileSync(outWebp)
         fs.unlinkSync(outWebp)
-
-        const media = { mimetype: 'webp', data }
-        const metadata = { packname: pack, author, categories: [''] }
-        const stickerPath = await writeExif(media, metadata)
-
-        await client.sendMessage(m.chat, { sticker: { url: stickerPath } }, { quoted: m })
-        fs.unlinkSync(stickerPath)
-      }
-
-      const makeStickerFromAnimatedWebpFile = async (inFile) => {
-        const outWebp = tmp(`sticker-anim-${Date.now()}.webp`)
-        const vf = buildVF(picked)
-        const filters = `${vf},fps=15`
-
-        await runFfmpeg([
-          '-y',
-          '-analyzeduration', '200M',
-          '-probesize', '200M',
-          '-i', inFile,
-          '-vf', filters,
-          '-an',
-          '-fps_mode', 'cfr',
-          '-loop', '0',
-          '-c:v', 'libwebp_anim',
-          '-preset', 'picture',
-          '-compression_level', '6',
-          '-q:v', '70',
-          outWebp
-        ])
-
-        const data = fs.readFileSync(outWebp)
-        fs.unlinkSync(outWebp)
-
-        const media = { mimetype: 'webp', data }
-        const metadata = { packname: pack, author, categories: [''] }
-        const stickerPath = await writeExif(media, metadata)
-
-        await client.sendMessage(m.chat, { sticker: { url: stickerPath } }, { quoted: m })
-        fs.unlinkSync(stickerPath)
+        await sendWebpWithExif(data)
       }
 
       const makeStickerFromVideoFile = async (inFile) => {
         await client.sendVideoAsSticker(m.chat, inFile, m, { packname: pack, author })
       }
 
-      if (/webp/i.test(mime)) {
-        const buffer = await quoted.download()
+      const handleWebpBuffer = async (buffer) => {
+        const animated = isAnimatedWebpBuffer(buffer)
+        if (animated) {
+          if (picked.length) {
+            return client.reply(m.chat, '《✧》 No puedo aplicar formas/efectos a stickers WEBP animados con ffmpeg en este método. Envíalo como imagen o usa /s sin flags.', m)
+          }
+          return sendWebpWithExif(buffer)
+        }
         const inFile = tmp(`in-${Date.now()}.webp`)
         fs.writeFileSync(inFile, buffer)
-
-        const animated = await isAnimatedWebp(inFile)
-        if (animated) {
-          await makeStickerFromAnimatedWebpFile(inFile)
-        } else {
-          await makeStickerFromImageFile(inFile)
-        }
-
+        await makeStickerFromImageFile(inFile)
         fs.unlinkSync(inFile)
+      }
+
+      if (/webp/i.test(mime)) {
+        const buffer = await quoted.download()
+        await handleWebpBuffer(buffer)
         return
       }
 
@@ -154,7 +125,6 @@ export default {
         const buffer = await quoted.download()
         const inFile = tmp(`in-${Date.now()}${extFromMime(mime, '.img')}`)
         fs.writeFileSync(inFile, buffer)
-
         await makeStickerFromImageFile(inFile)
         fs.unlinkSync(inFile)
         return
@@ -165,7 +135,6 @@ export default {
         const buffer = await quoted.download()
         const inFile = tmp(`vid-${Date.now()}.mp4`)
         fs.writeFileSync(inFile, buffer)
-
         await makeStickerFromVideoFile(inFile)
         fs.unlinkSync(inFile)
         return
@@ -179,18 +148,10 @@ export default {
 
         const res = await fetch(url)
         if (!res.ok) return client.reply(m.chat, '《✧》 No pude descargar ese archivo desde la URL.', m)
-        const ab = await res.arrayBuffer()
-        const buffer = Buffer.from(ab)
+        const buffer = Buffer.from(await res.arrayBuffer())
 
         if (url.match(/\.webp(\?.*)?$/i)) {
-          const inFile = tmp(`url-${Date.now()}.webp`)
-          fs.writeFileSync(inFile, buffer)
-
-          const animated = await isAnimatedWebp(inFile)
-          if (animated) await makeStickerFromAnimatedWebpFile(inFile)
-          else await makeStickerFromImageFile(inFile)
-
-          fs.unlinkSync(inFile)
+          await handleWebpBuffer(buffer)
           return
         }
 
@@ -243,26 +204,11 @@ const runFfmpeg = (args) =>
     })
   })
 
-const runFfprobe = (args) =>
-  new Promise((resolve) => {
-    const p = spawn('ffprobe', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let out = ''
-    p.stdout.on('data', (d) => (out += d.toString()))
-    p.on('close', () => resolve(out))
-  })
-
-const isAnimatedWebp = async (file) => {
-  const out = await runFfprobe([
-    '-v', 'error',
-    '-select_streams', 'v:0',
-    '-show_entries', 'stream=codec_name,nb_frames,width,height',
-    '-of', 'default=nk=1:nw=1',
-    file
-  ])
-  const parts = out.trim().split('\n').map(s => s.trim()).filter(Boolean)
-  const nb = parts.find(s => /^\d+$/.test(s))
-  const n = nb ? parseInt(nb, 10) : 1
-  return n > 1
+const isAnimatedWebpBuffer = (buf) => {
+  if (!Buffer.isBuffer(buf) || buf.length < 32) return false
+  const anim = Buffer.from('ANIM')
+  const anmf = Buffer.from('ANMF')
+  return buf.indexOf(anim) !== -1 || buf.indexOf(anmf) !== -1
 }
 
 const parseArgs = (args) => {
@@ -377,26 +323,18 @@ const buildVF = (picked) => {
   const alphaExpr = (() => {
     if (!shape || shape === 'cover' || shape === 'contain' || shape === 'mirror' || shape === 'border' || shape === 'frame') return null
 
-    if (shape === 'circle') {
-      return clamp255(`lte((X-${cx})*(X-${cx})+(Y-${cy})*(Y-${cy}),(${r}-6)*(${r}-6))`)
-    }
-
+    if (shape === 'circle') return clamp255(`lte((X-${cx})*(X-${cx})+(Y-${cy})*(Y-${cy}),(${r}-6)*(${r}-6))`)
     if (shape === 'ellipse') {
       const rx = `(${W}*0.46)`
       const ry = `(${H}*0.40)`
       return clamp255(`lte(((X-${cx})*(X-${cx}))/((${rx})*(${rx}))+((Y-${cy})*(Y-${cy}))/((${ry})*(${ry})),1)`)
     }
-
-    if (shape === 'diamond') {
-      return clamp255(`lte(abs(X-${cx})+abs(Y-${cy}),(${r}-6))`)
-    }
-
+    if (shape === 'diamond') return clamp255(`lte(abs(X-${cx})+abs(Y-${cy}),(${r}-6))`)
     if (shape === 'triangle') {
       const topY = `${H}*0.08`
       const botY = `${H}*0.94`
       return clamp255(`gte(Y,${topY})*lte(Y,${botY})*lte(abs(X-${cx}), ((${botY}-Y)*0.58))`)
     }
-
     if (shape === 'roundrect') {
       const pad = 28
       const cr = 64
@@ -407,11 +345,10 @@ const buildVF = (picked) => {
       const inCore = `(X>=${x0}+${cr})*(X<=${x1}-${cr})*(Y>=${y0})*(Y<=${y1})+(X>=${x0})*(X<=${x1})*(Y>=${y0}+${cr})*(Y<=${y1}-${cr})`
       const c1 = `lte((X-(${x0}+${cr}))*(X-(${x0}+${cr}))+(Y-(${y0}+${cr}))*(Y-(${y0}+${cr})),(${cr})*(${cr}))`
       const c2 = `lte((X-(${x1}-${cr}))*(X-(${x1}-${cr}))+(Y-(${y0}+${cr}))*(Y-(${y0}+${cr})),(${cr})*(${cr}))`
-      const c3 = `lte((X-(${x0}+${cr}))*(X-(${x0}+${cr}))+(Y-(${y1}-${cr}))*(Y-(${y1}-${cr})) ,(${cr})*(${cr}))`
+      const c3 = `lte((X-(${x0}+${cr}))*(X-(${x0}+${cr}))+(Y-(${y1}-${cr}))*(Y-(${y1}-${cr})),(${cr})*(${cr}))`
       const c4 = `lte((X-(${x1}-${cr}))*(X-(${x1}-${cr}))+(Y-(${y1}-${cr}))*(Y-(${y1}-${cr})),(${cr})*(${cr}))`
       return clamp255(`gt(${inCore}+${c1}+${c2}+${c3}+${c4},0)`)
     }
-
     if (shape === 'cross') {
       const w = `${W}*0.28`
       const h = `${H}*0.28`
@@ -419,14 +356,11 @@ const buildVF = (picked) => {
       const hbar = `(abs(Y-${cy})<=${h}/2)*(abs(X-${cx})<=${W}*0.46)`
       return clamp255(`gt(${v}+${hbar},0)`)
     }
-
     if (shape === 'heart') {
       const xn = `(X-${cx})/(${W}*0.33)`
       const yn = `(Y-${cy})/(${H}*0.33)`
-      const eq = `lte(pow(${xn}*${xn}+${yn}*${yn}-1,3)-(${xn}*${xn})*pow(${yn},3),0)`
-      return clamp255(eq)
+      return clamp255(`lte(pow(${xn}*${xn}+${yn}*${yn}-1,3)-(${xn}*${xn})*pow(${yn},3),0)`)
     }
-
     if (shape === 'star') {
       const dx = `(X-${cx})`
       const dy = `(Y-${cy})`
@@ -437,14 +371,12 @@ const buildVF = (picked) => {
       const limit = `(${base}+${amp}*cos(5*${theta}))`
       return clamp255(`lte(${rad},${limit}*2.0)`)
     }
-
     if (shape === 'wave') {
       const amp = `${H}*0.06`
       const mid = `${H}*0.50`
       const yline = `(${mid}+${amp}*sin(X*0.06))`
       return clamp255(`lte(abs(Y-${yline}),${H}*0.40)`)
     }
-
     if (shape === 'hexagon' || shape === 'pentagon' || shape === 'octagon') {
       const n = shape === 'pentagon' ? 5 : shape === 'octagon' ? 8 : 6
       const dx = `(X-${cx})`
@@ -459,9 +391,7 @@ const buildVF = (picked) => {
     return null
   })()
 
-  if (alphaExpr) {
-    vf.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alphaExpr}'`)
-  }
+  if (alphaExpr) vf.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alphaExpr}'`)
 
   vf.push('format=yuva420p')
   return vf.join(',')
