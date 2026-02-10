@@ -116,8 +116,13 @@ async function searchSticker(query) {
 
   $('.sticker-pack-cols a').each((_, el) => {
     const title = $(el).find('.title').text().trim()
-    const href = $(el).attr('href')
-    if (title && href) packs.push({ title, url: 'https://getstickerpack.com' + href })
+    let href = $(el).attr('href')
+    if (title && href) {
+      if (!href.startsWith('http')) {
+        href = 'https://getstickerpack.com' + href
+      }
+      packs.push({ title, url: href })
+    }
   })
 
   return packs
@@ -130,8 +135,13 @@ async function getStickers(url) {
   const links = []
 
   $('img.sticker-image').each((_, el) => {
-    const src = $(el).attr('data-src-large') || $(el).attr('src')
-    if (src) links.push(src)
+    let src = $(el).attr('data-src-large') || $(el).attr('src')
+    if (src) {
+      if (!src.startsWith('http')) {
+        src = 'https://getstickerpack.com' + src
+      }
+      links.push(src)
+    }
   })
 
   return links
