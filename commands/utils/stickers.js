@@ -9,8 +9,7 @@ const { writeExif } = exif
 
 export default {
   command: ['stickers', 'searchsticker'],
-  category: 'sticker',
-
+  category: 'utils',
   run: async (client, m, args) => {
     const raw = (args || []).join(' ').trim()
     if (!raw) return m.reply('《✧》 Por favor, ingresa el nombre de los *stickers* a buscar.')
@@ -104,8 +103,8 @@ const parseQueryAndMeta = (raw, m) => {
 
   return {
     query: parts[0],
-    packname: parts[1] || user.metadatos || 'ʏᴜᴋɪ 🧠 Wᴀʙᴏᴛ'ꜱ',
-    author: parts[2] || user.metadatos2 || '${m.pushName}'
+    packname: parts[1] || user.metadatos || "ʏᴜᴋɪ 🧠 Wᴀʙᴏᴛ'ꜱ",
+    author: parts[2] || user.metadatos2 || `${m.pushName}`
   }
 }
 
