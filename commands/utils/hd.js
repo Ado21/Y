@@ -1,15 +1,12 @@
-import nodeFetch from 'node-fetch'
 import crypto from 'crypto'
 import fileTypePkg from 'file-type'
 import { promises as fsp } from 'fs'
-import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { spawn } from 'child_process'
 
 const { fileTypeFromBuffer } = fileTypePkg
-const fetchFn = globalThis.fetch ? globalThis.fetch.bind(globalThis) : nodeFetch
-
+const fetchFn = fetch
 export default {
   command: ['hd', 'enhance', 'remini'],
   category: 'utils',
@@ -18,15 +15,8 @@ export default {
       const q = m.quoted || m
       const mime = q?.mimetype || q?.msg?.mimetype || ''
 
-      if (!mime) return m.reply(`《✧》 Responde a una *imagen* con:\n${usedPrefix + command} 2|4|8|16`)
+      if (!mime) return m.reply(`《✧》 Responde a una *imagen* con:\n${usedPrefix + command}`)
       if (!/^image\/(jpe?g|png|webp)$/i.test(mime)) return m.reply(`《✧》 El formato *${mime || 'desconocido'}* no es compatible`)
-
-      const x = Number(args?.[0])
-      if (![2, 4, 8, 16].includes(x)) {
-        return m.reply(
-          `《✧》 Elige cuánto mejorar:\n${usedPrefix + command} 2\n${usedPrefix + command} 4\n${usedPrefix + command} 8\n${usedPrefix + command} 16`
-        )
-      }
 
       const buffer = await q.download?.()
       if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 10) return m.reply('《✧》 No se pudo descargar la imagen')
@@ -108,9 +98,9 @@ async function webpToPngWithFfmpeg(webpBuf, tmpDir) {
   try {
     await runFfmpeg(['-y', '-i', inPath, '-frames:v', '1', outPath], 60000)
     const png = await fsp.readFile(outPath)
-    return { ok: true, png, inPath, outPath }
+    return { ok: true, png }
   } catch (e) {
-    return { ok: false, error: e?.message || String(e), inPath, outPath }
+    return { ok: false, error: e?.message || String(e) }
   } finally {
     try {
       await fsp.unlink(inPath)
