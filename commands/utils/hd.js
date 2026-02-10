@@ -1,7 +1,8 @@
 import fetch from 'node-fetch'
 import crypto from 'crypto'
 import FormData from 'form-data'
-import { fileTypeFromBuffer } from 'file-type'
+import fileTypePkg from 'file-type'
+const { fileTypeFromBuffer } = fileTypePkg
 
 export default {
   command: ['hd', 'enhance', 'remini'],
