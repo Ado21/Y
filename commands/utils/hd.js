@@ -3,7 +3,6 @@ import crypto from 'crypto'
 import FormData from 'form-data'
 import fileTypePkg from 'file-type'
 import { promises as fsp } from 'fs'
-import fs from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -34,14 +33,13 @@ export default {
       const inputMime = ft?.mime || mime || 'image/jpeg'
       if (!/^image\/(jpe?g|png)$/i.test(inputMime)) return m.reply(`《✧》 El formato *${inputMime}* no es compatible`)
 
-      const result = await upscaleFromBuffer(buffer, inputMime, x)
+      const result = await imgupscalerEnhanceViaCatbox(buffer, inputMime, x)
 
       if (!result?.ok || !result?.buffer) {
         const msg =
           result?.error?.message ||
           result?.error?.step ||
           result?.status?.code ||
-          result?.create_upload?.code ||
           result?.create_upscale?.code ||
           'error'
         return m.reply(`《✧》 No se pudo *mejorar* la imagen (${msg})`)
@@ -65,7 +63,61 @@ async function safeFileType(buf) {
   }
 }
 
-async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
+function extFromMime(mime) {
+  if (/png/i.test(mime)) return 'png'
+  return 'jpg'
+}
+
+async function safeJson(res) {
+  const t = await res.text().catch(() => '')
+  try {
+    return JSON.parse(t)
+  } catch {
+    return { raw: t }
+  }
+}
+
+async function sleep(ms) {
+  await new Promise((r) => setTimeout(r, ms))
+}
+
+async function fetchBytes(url, ua) {
+  const r = await fetch(url, { method: 'GET', headers: { 'User-Agent': ua || 'Mozilla/5.0' } })
+  if (!r.ok) {
+    return { ok: false, status: r.status, statusText: r.statusText, body: await r.text().catch(() => '') }
+  }
+  const ab = await r.arrayBuffer()
+  return {
+    ok: true,
+    contentType: r.headers.get('content-type') || 'application/octet-stream',
+    bytes: Buffer.from(ab)
+  }
+}
+
+async function uploadToCatboxFromTmp(tmpPath) {
+  const fd = new FormData()
+  fd.append('reqtype', 'fileupload')
+  fd.append('fileToUpload', await fsp.readFile(tmpPath), {
+    filename: path.basename(tmpPath),
+    contentType: 'application/octet-stream'
+  })
+
+  const r = await fetch('https://catbox.moe/user/api.php', {
+    method: 'POST',
+    headers: fd.getHeaders(),
+    body: fd
+  })
+
+  const t = await r.text().catch(() => '')
+  if (!r.ok) return { ok: false, status: r.status, statusText: r.statusText, body: t }
+
+  const url = String(t || '').trim()
+  if (!/^https?:\/\/.+/i.test(url)) return { ok: false, status: r.status, statusText: r.statusText, body: t }
+
+  return { ok: true, url }
+}
+
+async function imgupscalerEnhanceViaCatbox(inputBuf, inputMime, upscaleX) {
   const API = 'https://api.imgupscaler.ai'
   const ORIGIN = 'https://imgupscaler.ai'
   const IMAGE_WIDTH = 2048
@@ -78,13 +130,15 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
     .update(`imgup-${Date.now()}-${Math.random()}`)
     .digest('hex')
 
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
+
   function headers(extra = {}) {
     return {
       Accept: '*/*',
       Origin: ORIGIN,
       Referer: `${ORIGIN}/`,
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+      'User-Agent': UA,
       'product-serial': PRODUCT_SERIAL,
       timezone: TIMEZONE,
       ...extra
@@ -100,28 +154,7 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
     return '8'
   }
 
-  async function sleep(ms) {
-    await new Promise((r) => setTimeout(r, ms))
-  }
-
-  async function safeJson(res) {
-    const t = await res.text().catch(() => '')
-    try {
-      return JSON.parse(t)
-    } catch {
-      return { raw: t }
-    }
-  }
-
-  async function fetchBytes(url) {
-    const r = await fetch(url, { method: 'GET', headers: { 'User-Agent': headers()['User-Agent'] } })
-    if (!r.ok) return { ok: false, status: r.status, statusText: r.statusText, body: await r.text().catch(() => '') }
-    const ab = await r.arrayBuffer()
-    const ct = r.headers.get('content-type') || 'application/octet-stream'
-    return { ok: true, contentType: ct, bytes: Buffer.from(ab) }
-  }
-
-  async function pollUpscale(jobId) {
+  async function pollJob(jobId) {
     const started = Date.now()
     let last = null
 
@@ -132,35 +165,19 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
       })
       const j = await safeJson(r)
       last = j
+
       if (j?.code === 100000 && j?.result?.output_url?.length) return { done: true, data: j }
       if (j?.code && j.code !== 300006 && j.code !== 100000) return { done: true, data: j }
+
       await sleep(POLL_INTERVAL_MS)
     }
 
     return { done: false, data: last }
   }
 
-  function filenameFromMime(mime) {
-    return /png/i.test(mime) ? 'input.png' : 'input.jpg'
-  }
-
-  async function createUploadFromTmpFile(tmpPath, contentType, filename) {
+  async function createUpscaleFromUrl(imageUrl, upscaleType) {
     const fd = new FormData()
-    fd.append('original_image_file', fs.createReadStream(tmpPath), { filename, contentType })
-
-    const r = await fetch(`${API}/api/image-upscaler/v2/upscale/create-job`, {
-      method: 'POST',
-      headers: headers(fd.getHeaders()),
-      body: fd
-    })
-
-    const j = await safeJson(r)
-    return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j }
-  }
-
-  async function createUpscaleFromCdnUrl(cdnUrl, upscaleType) {
-    const fd = new FormData()
-    fd.append('original_image_url', String(cdnUrl))
+    fd.append('original_image_url', String(imageUrl))
     fd.append('upscale_type', String(upscaleType))
     fd.append('image_width', String(IMAGE_WIDTH))
     fd.append('image_height', String(IMAGE_HEIGHT))
@@ -184,41 +201,32 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
   }
 
   const tmpDir = path.join(os.tmpdir(), 'imgupscaler')
-  const tmpPath = path.join(
-    tmpDir,
-    `img_${Date.now()}_${Math.random().toString(16).slice(2)}${/png/i.test(inputMime) ? '.png' : '.jpg'}`
-  )
+  const tmpPath = path.join(tmpDir, `img_${Date.now()}_${Math.random().toString(16).slice(2)}.${extFromMime(inputMime)}`)
 
   try {
     await fsp.mkdir(tmpDir, { recursive: true })
     await fsp.writeFile(tmpPath, inputBuf)
 
-    const up = await createUploadFromTmpFile(tmpPath, inputMime || 'image/jpeg', filenameFromMime(inputMime))
-    out.create_upload = up.body
+    const up = await uploadToCatboxFromTmp(tmpPath)
+    out.upload = up.ok ? { ok: true, url: up.url } : up
     if (!up.ok) {
-      out.error = { step: 'upload-create-job', status: up.status, body: up.body }
+      out.error = { step: 'upload-catbox', ...up }
       return out
     }
 
-    const cdnInputUrl = up.body?.result?.input_url
-    if (!cdnInputUrl) {
-      out.error = { step: 'upload-create-job', message: 'no_input_url', body: up.body }
-      return out
-    }
-
-    out.cdn_input_url = cdnInputUrl
+    out.input = { url: up.url }
 
     const upscaleType = upscaleTypeFromX(upscaleX)
-    const upscaleJob = await createUpscaleFromCdnUrl(cdnInputUrl, upscaleType)
-    out.create_upscale = upscaleJob.body
-    if (!upscaleJob.ok) {
-      out.error = { step: 'create-upscale-job', status: upscaleJob.status, body: upscaleJob.body }
+    const job = await createUpscaleFromUrl(up.url, upscaleType)
+    out.create_upscale = job.body
+    if (!job.ok) {
+      out.error = { step: 'create-upscale-job', status: job.status, body: job.body }
       return out
     }
 
-    out.upscale_job_id = upscaleJob.job_id
+    out.upscale_job_id = job.job_id
 
-    const polled = await pollUpscale(upscaleJob.job_id)
+    const polled = await pollJob(job.job_id)
     out.status = polled.data
 
     if (!polled.done) {
@@ -233,7 +241,7 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
       return out
     }
 
-    const file = await fetchBytes(outputUrl)
+    const file = await fetchBytes(outputUrl, UA)
     if (!file.ok) {
       out.error = { step: 'download-output', ...file }
       return out
