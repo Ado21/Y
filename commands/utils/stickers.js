@@ -39,8 +39,17 @@ export default {
 
           let webpBuffer = buffer
 
-          // Si la URL no termina en .webp, convertimos (o si es animado y necesitamos estático)
-          if (!imgUrl.toLowerCase().endsWith('.webp')) {
+          // Función para detectar si el buffer ya es un WebP (Magic Bytes)
+          const isWebP = (buf) => {
+             // WebP empieza con RIFF....WEBP
+             return buf.length > 12 &&
+                   buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+                   buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+          }
+
+          // SOLO convertimos si NO es WebP (ej. si es PNG o JPG)
+          // Si ya es WebP, lo usamos directo para evitar el error de FFmpeg con animaciones
+          if (!isWebP(buffer)) {
             let ext = path.extname(imgUrl).split('?')[0]
             if (!ext || ext.length > 5) ext = '.png'
 
@@ -50,12 +59,9 @@ export default {
             fs.writeFileSync(inFile, buffer)
 
             try {
-              // SOLUCIÓN: Agregado '-vframes', '1' para extraer solo el primer frame si es animado
-              // Esto evita el error de "skipping unsupported chunk: ANIM"
               await runFfmpeg([
                 '-y',
                 '-i', inFile,
-                '-vframes', '1', 
                 '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
                 '-c:v', 'libwebp',
                 '-lossless', '1',
@@ -69,8 +75,8 @@ export default {
               }
             } catch (err) {
               console.error('FFmpeg Error:', err.message)
-              // Si falla FFmpeg, intentamos usar el buffer original si es webp
-              if (!imgUrl.toLowerCase().endsWith('.webp')) throw err
+              // Si falla la conversión, intentamos seguir con el original si fuera posible
+              throw err
             } finally {
               if (fs.existsSync(inFile)) fs.unlinkSync(inFile)
               if (fs.existsSync(outFile)) fs.unlinkSync(outFile)
