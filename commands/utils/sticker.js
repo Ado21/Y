@@ -3,24 +3,269 @@ import path from 'path'
 import { spawn } from 'child_process'
 import fetch from 'node-fetch'
 import exif from '../../lib/exif.js'
+
+export default {
+  command: ['sticker', 's'],
+  category: 'utils',
+  run: async (client, m, args, usedPrefix, command) => {
+    try {
+      ensureTmp()
+
+      if (args[0] === '-list') {
+        const helpText = `ꕥ Lista de Formas y Efectos Disponibles para *imagen*:
+
+✦ *Formas:*
+- -c : Crea un sticker circular
+- -t : Crea un sticker triangular
+- -s : Crea un sticker con forma de estrella
+- -r : Crea un sticker con esquinas redondeadas
+- -h : Crea un sticker hexagonal
+- -d : Crea un sticker con forma de diamante
+- -f : Crea un sticker con un marco
+- -b : Crea un sticker con un borde
+- -w : Crea un sticker con forma de onda
+- -m : Crea un sticker espejado
+- -o : Crea un sticker octogonal
+- -y : Crea un sticker pentagonal
+- -e : Crea un sticker elíptico
+- -z : Crea un sticker en forma de cruz
+- -v : Crea un sticker con forma de corazón
+- -x : Crea un sticker expandido (cover)
+- -i : Crea un sticker expandido (contain)
+
+✧ *Efectos:*
+- -blur : Aplica un efecto de desenfoque
+- -sepia : Aplica un efecto sepia
+- -sharpen : Aplica un efecto de nitidez
+- -brighten : Aumenta el brillo
+- -darken : Disminuye el brillo
+- -invert : Invierte los colores
+- -grayscale : Aplica escala de grises
+- -rotate90 : Rota la imagen 90 grados
+- -rotate180 : Rota la imagen 180 grados
+- -flip : Invierte la imagen horizontalmente
+- -flop : Invierte la imagen verticalmente
+- -normalice : Normaliza la imagen
+- -negate : Negatiza la imagen
+- -tint : Aplica un tinte de color a la imagen (rojo por defecto)
+
+> Ejemplo: *${usedPrefix + command} -c -blur Pack • Autor*`
+        return client.reply(m.chat, helpText, m)
+      }
+
+      const quoted = m.quoted ? m.quoted : m
+      const mime = (quoted.msg || quoted).mimetype || ''
+
+      const user = global.db?.data?.users?.[m.sender] || {}
+      const name = user.name || ''
+      const texto1 = user.metadatos || "ʏᴜᴋɪ 🧠 Wᴀʙᴏᴛ'ꜱ"
+      const texto2 = user.metadatos2 || `@${name}`
+
+      const { urlArg, picked, marca } = parseArgs(args)
+
+      const pack = marca[0] || texto1
+      const author = marca.length > 1 ? marca[1] : texto2
+
+      const makeStickerFromImageFile = async (inFile) => {
+        const outWebp = tmp(`sticker-${Date.now()}.webp`)
+        const vf = buildVF(picked)
+
+        await runFfmpeg([
+          '-y',
+          '-analyzeduration', '200M',
+          '-probesize', '200M',
+          '-fflags', '+genpts',
+          '-i', inFile,
+          '-vf', vf,
+          '-an',
+          '-fps_mode', 'passthrough',
+          '-loop', '0',
+          '-c:v', 'libwebp',
+          '-preset', 'picture',
+          '-compression_level', '6',
+          '-q:v', '70',
+          outWebp
+        ])
+
+        const data = fs.readFileSync(outWebp)
+        fs.unlinkSync(outWebp)
+
+        const media = { mimetype: 'webp', data }
+        const metadata = { packname: pack, author, categories: [''] }
+        const stickerPath = await writeExif(media, metadata)
+
+        await client.sendMessage(m.chat, { sticker: { url: stickerPath } }, { quoted: m })
+        fs.unlinkSync(stickerPath)
+      }
+
+      const makeStickerFromAnimatedWebpFile = async (inFile) => {
+        const outWebp = tmp(`sticker-anim-${Date.now()}.webp`)
+        const vf = buildVF(picked)
+        const filters = `${vf},fps=15`
+
+        await runFfmpeg([
+          '-y',
+          '-analyzeduration', '200M',
+          '-probesize', '200M',
+          '-i', inFile,
+          '-vf', filters,
+          '-an',
+          '-fps_mode', 'cfr',
+          '-loop', '0',
+          '-c:v', 'libwebp_anim',
+          '-preset', 'picture',
+          '-compression_level', '6',
+          '-q:v', '70',
+          outWebp
+        ])
+
+        const data = fs.readFileSync(outWebp)
+        fs.unlinkSync(outWebp)
+
+        const media = { mimetype: 'webp', data }
+        const metadata = { packname: pack, author, categories: [''] }
+        const stickerPath = await writeExif(media, metadata)
+
+        await client.sendMessage(m.chat, { sticker: { url: stickerPath } }, { quoted: m })
+        fs.unlinkSync(stickerPath)
+      }
+
+      const makeStickerFromVideoFile = async (inFile) => {
+        await client.sendVideoAsSticker(m.chat, inFile, m, { packname: pack, author })
+      }
+
+      if (/webp/i.test(mime)) {
+        const buffer = await quoted.download()
+        const inFile = tmp(`in-${Date.now()}.webp`)
+        fs.writeFileSync(inFile, buffer)
+
+        const animated = await isAnimatedWebp(inFile)
+        if (animated) {
+          await makeStickerFromAnimatedWebpFile(inFile)
+        } else {
+          await makeStickerFromImageFile(inFile)
+        }
+
+        fs.unlinkSync(inFile)
+        return
+      }
+
+      if (/image/i.test(mime)) {
+        const buffer = await quoted.download()
+        const inFile = tmp(`in-${Date.now()}${extFromMime(mime, '.img')}`)
+        fs.writeFileSync(inFile, buffer)
+
+        await makeStickerFromImageFile(inFile)
+        fs.unlinkSync(inFile)
+        return
+      }
+
+      if (/video/i.test(mime)) {
+        if ((quoted.msg || quoted).seconds > 20) return m.reply('《✧》 El video no puede ser muy largo')
+        const buffer = await quoted.download()
+        const inFile = tmp(`vid-${Date.now()}.mp4`)
+        fs.writeFileSync(inFile, buffer)
+
+        await makeStickerFromVideoFile(inFile)
+        fs.unlinkSync(inFile)
+        return
+      }
+
+      if (urlArg) {
+        const url = urlArg
+        if (!url.match(/\.(jpe?g|png|gif|webp|mp4|mov|avi|mkv|webm)(\?.*)?$/i)) {
+          return client.reply(m.chat, '《✧》 La URL debe ser de una imagen (jpg, png, gif, webp) o video (mp4, mov, avi, mkv, webm)', m)
+        }
+
+        const res = await fetch(url)
+        if (!res.ok) return client.reply(m.chat, '《✧》 No pude descargar ese archivo desde la URL.', m)
+        const ab = await res.arrayBuffer()
+        const buffer = Buffer.from(ab)
+
+        if (url.match(/\.webp(\?.*)?$/i)) {
+          const inFile = tmp(`url-${Date.now()}.webp`)
+          fs.writeFileSync(inFile, buffer)
+
+          const animated = await isAnimatedWebp(inFile)
+          if (animated) await makeStickerFromAnimatedWebpFile(inFile)
+          else await makeStickerFromImageFile(inFile)
+
+          fs.unlinkSync(inFile)
+          return
+        }
+
+        if (url.match(/\.(jpe?g|png|gif)(\?.*)?$/i)) {
+          const inFile = tmp(`url-${Date.now()}.img`)
+          fs.writeFileSync(inFile, buffer)
+          await makeStickerFromImageFile(inFile)
+          fs.unlinkSync(inFile)
+          return
+        }
+
+        if (url.match(/\.(mp4|mov|avi|mkv|webm)(\?.*)?$/i)) {
+          const inFile = tmp(`urlvid-${Date.now()}.mp4`)
+          fs.writeFileSync(inFile, buffer)
+          await makeStickerFromVideoFile(inFile)
+          fs.unlinkSync(inFile)
+          return
+        }
+      }
+
+      return client.reply(
+        m.chat,
+        `《✧》 Por favor, envía una imagen, video, sticker o URL para hacer un sticker.\n> Usa *${usedPrefix + command} -list* para ver formas y efectos`,
+        m
+      )
+    } catch (e) {
+      return m.reply(`> An unexpected error occurred while executing command *${usedPrefix + command}*. Please try again or contact support if the issue persists.\n> [Error: *${e.message}*]`)
+    }
+  }
+}
+
 const { writeExif } = exif
 
 const tmp = (name) => path.join('./tmp', name)
-const ensureTmp = () => { if (!fs.existsSync('./tmp')) fs.mkdirSync('./tmp', { recursive: true }) }
+
+const ensureTmp = () => {
+  if (!fs.existsSync('./tmp')) fs.mkdirSync('./tmp', { recursive: true })
+}
 
 const isUrl = (text) => /https?:\/\/[^\s]+/i.test(text)
 
-const runFfmpeg = (args) => new Promise((resolve, reject) => {
-  const p = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-  let err = ''
-  p.stderr.on('data', d => (err += d.toString()))
-  p.on('close', code => {
-    if (code === 0) return resolve(true)
-    reject(new Error(err || `ffmpeg exited with code ${code}`))
+const runFfmpeg = (args) =>
+  new Promise((resolve, reject) => {
+    const p = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let err = ''
+    p.stderr.on('data', (d) => (err += d.toString()))
+    p.on('close', (code) => {
+      if (code === 0) return resolve(true)
+      reject(new Error(err || `ffmpeg exited with code ${code}`))
+    })
   })
-})
 
-const parseArgs = (args, usedPrefix, command) => {
+const runFfprobe = (args) =>
+  new Promise((resolve) => {
+    const p = spawn('ffprobe', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    p.stdout.on('data', (d) => (out += d.toString()))
+    p.on('close', () => resolve(out))
+  })
+
+const isAnimatedWebp = async (file) => {
+  const out = await runFfprobe([
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-show_entries', 'stream=codec_name,nb_frames,width,height',
+    '-of', 'default=nk=1:nw=1',
+    file
+  ])
+  const parts = out.trim().split('\n').map(s => s.trim()).filter(Boolean)
+  const nb = parts.find(s => /^\d+$/.test(s))
+  const n = nb ? parseInt(nb, 10) : 1
+  return n > 1
+}
+
+const parseArgs = (args) => {
   let urlArg = null
   const rest = []
   for (const a of args) {
@@ -72,17 +317,17 @@ const parseArgs = (args, usedPrefix, command) => {
   }
 
   const filteredText = rest.join(' ').replace(/-\w+/g, '').trim()
-  const marca = filteredText.split(/[\u2022|]/).map(s => s.trim()).filter(Boolean)
+  const marca = filteredText.split(/[\u2022|]/).map((s) => s.trim()).filter(Boolean)
 
-  return { urlArg, picked, marca, shapeArgs, effectArgs }
+  return { urlArg, picked, marca }
 }
 
 const buildVF = (picked) => {
   const W = 512
   const H = 512
 
-  const shape = picked.find(x => x.type === 'shape')?.value || null
-  const effects = picked.filter(x => x.type === 'effect').map(x => x.value)
+  const shape = picked.find((x) => x.type === 'shape')?.value || null
+  const effects = picked.filter((x) => x.type === 'effect').map((x) => x.value)
 
   const vf = []
 
@@ -162,7 +407,7 @@ const buildVF = (picked) => {
       const inCore = `(X>=${x0}+${cr})*(X<=${x1}-${cr})*(Y>=${y0})*(Y<=${y1})+(X>=${x0})*(X<=${x1})*(Y>=${y0}+${cr})*(Y<=${y1}-${cr})`
       const c1 = `lte((X-(${x0}+${cr}))*(X-(${x0}+${cr}))+(Y-(${y0}+${cr}))*(Y-(${y0}+${cr})),(${cr})*(${cr}))`
       const c2 = `lte((X-(${x1}-${cr}))*(X-(${x1}-${cr}))+(Y-(${y0}+${cr}))*(Y-(${y0}+${cr})),(${cr})*(${cr}))`
-      const c3 = `lte((X-(${x0}+${cr}))*(X-(${x0}+${cr}))+(Y-(${y1}-${cr}))*(Y-(${y1}-${cr})),(${cr})*(${cr}))`
+      const c3 = `lte((X-(${x0}+${cr}))*(X-(${x0}+${cr}))+(Y-(${y1}-${cr}))*(Y-(${y1}-${cr})) ,(${cr})*(${cr}))`
       const c4 = `lte((X-(${x1}-${cr}))*(X-(${x1}-${cr}))+(Y-(${y1}-${cr}))*(Y-(${y1}-${cr})),(${cr})*(${cr}))`
       return clamp255(`gt(${inCore}+${c1}+${c2}+${c3}+${c4},0)`)
     }
@@ -229,157 +474,4 @@ const extFromMime = (mime, fallback = '.bin') => {
   if (/gif/i.test(mime)) return '.gif'
   if (/mp4|mkv|webm|mov|avi/i.test(mime)) return '.mp4'
   return fallback
-}
-
-export default {
-  command: ['sticker', 's'],
-  category: 'utils',
-  run: async (client, m, args, usedPrefix, command) => {
-    try {
-      ensureTmp()
-
-      if (args[0] === '-list') {
-        const helpText = `ꕥ Lista de Formas y Efectos Disponibles para *imagen*:
-
-✦ *Formas:*
-- -c : Crea un sticker circular
-- -t : Crea un sticker triangular
-- -s : Crea un sticker con forma de estrella
-- -r : Crea un sticker con esquinas redondeadas
-- -h : Crea un sticker hexagonal
-- -d : Crea un sticker con forma de diamante
-- -f : Crea un sticker con un marco
-- -b : Crea un sticker con un borde
-- -w : Crea un sticker con forma de onda
-- -m : Crea un sticker espejado
-- -o : Crea un sticker octogonal
-- -y : Crea un sticker pentagonal
-- -e : Crea un sticker elíptico
-- -z : Crea un sticker en forma de cruz
-- -v : Crea un sticker con forma de corazón
-- -x : Crea un sticker expandido (cover)
-- -i : Crea un sticker expandido (contain)
-
-✧ *Efectos:*
-- -blur : Aplica un efecto de desenfoque
-- -sepia : Aplica un efecto sepia
-- -sharpen : Aplica un efecto de nitidez
-- -brighten : Aumenta el brillo
-- -darken : Disminuye el brillo
-- -invert : Invierte los colores
-- -grayscale : Aplica escala de grises
-- -rotate90 : Rota la imagen 90 grados
-- -rotate180 : Rota la imagen 180 grados
-- -flip : Invierte la imagen horizontalmente
-- -flop : Invierte la imagen verticalmente
-- -normalice : Normaliza la imagen
-- -negate : Negatiza la imagen
-- -tint : Aplica un tinte de color a la imagen (rojo por defecto)
-
-> Ejemplo: *${usedPrefix + command} -c -blur Pack • Autor*`
-        return client.reply(m.chat, helpText, m)
-      }
-
-      const quoted = m.quoted ? m.quoted : m
-      const mime = (quoted.msg || quoted).mimetype || ''
-
-      const user = global.db?.data?.users?.[m.sender] || {}
-      const name = user.name || ''
-      const texto1 = user.metadatos || "ʏᴜᴋɪ 🧠 Wᴀʙᴏᴛ'ꜱ"
-      const texto2 = user.metadatos2 || `@${name}`
-
-      const { urlArg, picked, marca } = parseArgs(args, usedPrefix, command)
-      const pack = marca[0] || texto1
-      const author = marca.length > 1 ? marca[1] : texto2
-
-      const makeStickerFromImageFile = async (inFile) => {
-        const outWebp = tmp(`sticker-${Date.now()}.webp`)
-        const vf = buildVF(picked)
-
-        await runFfmpeg([
-          '-y',
-          '-i', inFile,
-          '-vf', vf,
-          '-loop', '0',
-          '-an',
-          '-vsync', '0',
-          '-preset', 'picture',
-          '-compression_level', '6',
-          '-q:v', '70',
-          outWebp
-        ])
-
-        const data = fs.readFileSync(outWebp)
-        fs.unlinkSync(outWebp)
-
-        const media = { mimetype: 'webp', data }
-        const metadata = { packname: pack, author, categories: [''] }
-        const stickerPath = await writeExif(media, metadata)
-
-        await client.sendMessage(m.chat, { sticker: { url: stickerPath } }, { quoted: m })
-        fs.unlinkSync(stickerPath)
-      }
-
-      const makeStickerFromVideoFile = async (inFile) => {
-        await client.sendVideoAsSticker(m.chat, inFile, m, { packname: pack, author })
-      }
-
-      if (/image|webp/i.test(mime)) {
-        const buffer = await quoted.download()
-        const inFile = tmp(`in-${Date.now()}${extFromMime(mime, '.img')}`)
-        fs.writeFileSync(inFile, buffer)
-
-        await makeStickerFromImageFile(inFile)
-        fs.unlinkSync(inFile)
-        return
-      }
-
-      if (/video/i.test(mime)) {
-        if ((quoted.msg || quoted).seconds > 20) return m.reply('《✧》 El video no puede ser muy largo')
-        const buffer = await quoted.download()
-        const inFile = tmp(`vid-${Date.now()}.mp4`)
-        fs.writeFileSync(inFile, buffer)
-
-        await makeStickerFromVideoFile(inFile)
-        fs.unlinkSync(inFile)
-        return
-      }
-
-      if (urlArg) {
-        const url = urlArg
-        if (!url.match(/\.(jpe?g|png|gif|webp|mp4|mov|avi|mkv|webm)(\?.*)?$/i)) {
-          return client.reply(m.chat, '《✧》 La URL debe ser de una imagen (jpg, png, gif, webp) o video (mp4, mov, avi, mkv, webm)', m)
-        }
-
-        const res = await fetch(url)
-        if (!res.ok) return client.reply(m.chat, '《✧》 No pude descargar ese archivo desde la URL.', m)
-        const ab = await res.arrayBuffer()
-        const buffer = Buffer.from(ab)
-
-        if (url.match(/\.(jpe?g|png|gif|webp)(\?.*)?$/i)) {
-          const inFile = tmp(`url-${Date.now()}.img`)
-          fs.writeFileSync(inFile, buffer)
-          await makeStickerFromImageFile(inFile)
-          fs.unlinkSync(inFile)
-          return
-        }
-
-        if (url.match(/\.(mp4|mov|avi|mkv|webm)(\?.*)?$/i)) {
-          const inFile = tmp(`urlvid-${Date.now()}.mp4`)
-          fs.writeFileSync(inFile, buffer)
-          await makeStickerFromVideoFile(inFile)
-          fs.unlinkSync(inFile)
-          return
-        }
-      }
-
-      return client.reply(
-        m.chat,
-        `《✧》 Por favor, envía una imagen, video, sticker o URL para hacer un sticker.\n> Usa *${usedPrefix + command} -list* para ver formas y efectos`,
-        m
-      )
-    } catch (e) {
-      return m.reply(`> An unexpected error occurred while executing command *${usedPrefix + command}*. Please try again or contact support if the issue persists.\n> [Error: *${e.message}*]`)
-    }
-  }
 }
