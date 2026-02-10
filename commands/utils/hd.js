@@ -1,18 +1,14 @@
 import nodeFetch from 'node-fetch'
 import crypto from 'crypto'
-import FormDataPkg from 'form-data'
 import fileTypePkg from 'file-type'
 import { promises as fsp } from 'fs'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { spawn } from 'child_process'
 
 const { fileTypeFromBuffer } = fileTypePkg
 const fetchFn = globalThis.fetch ? globalThis.fetch.bind(globalThis) : nodeFetch
-
-function hasNativeMultipart() {
-  return typeof globalThis.FormData !== 'undefined' && typeof globalThis.Blob !== 'undefined'
-}
 
 export default {
   command: ['hd', 'enhance', 'remini'],
@@ -23,7 +19,7 @@ export default {
       const mime = q?.mimetype || q?.msg?.mimetype || ''
 
       if (!mime) return m.reply(`《✧》 Responde a una *imagen* con:\n${usedPrefix + command} 2|4|8|16`)
-      if (!/^image\/(jpe?g|png)$/i.test(mime)) return m.reply(`《✧》 El formato *${mime || 'desconocido'}* no es compatible`)
+      if (!/^image\/(jpe?g|png|webp)$/i.test(mime)) return m.reply(`《✧》 El formato *${mime || 'desconocido'}* no es compatible`)
 
       const x = Number(args?.[0])
       if (![2, 4, 8, 16].includes(x)) {
@@ -37,18 +33,12 @@ export default {
 
       const ft = await safeFileType(buffer)
       const inputMime = ft?.mime || mime || 'image/jpeg'
-      if (!/^image\/(jpe?g|png)$/i.test(inputMime)) return m.reply(`《✧》 El formato *${inputMime}* no es compatible`)
+      if (!/^image\/(jpe?g|png|webp)$/i.test(inputMime)) return m.reply(`《✧》 El formato *${inputMime}* no es compatible`)
 
-      const result = await imgupscalerEnhance(buffer, inputMime, x)
+      const result = await vectorinkEnhanceFromBuffer(buffer, inputMime)
 
       if (!result?.ok || !result?.buffer) {
-        const msg =
-          result?.error?.code ||
-          result?.error?.message ||
-          result?.error?.step ||
-          result?.create_upload?.code ||
-          result?.create_upscale?.code ||
-          'error'
+        const msg = result?.error?.code || result?.error?.step || result?.error?.message || 'error'
         return m.reply(`《✧》 No se pudo *mejorar* la imagen (${msg})`)
       }
 
@@ -70,23 +60,6 @@ async function safeFileType(buf) {
   }
 }
 
-function upscaleTypeFromX(x) {
-  const v = Number(x)
-  if (v === 2) return '8'
-  if (v === 4) return '16'
-  if (v === 8) return '32'
-  if (v === 16) return '64'
-  return '8'
-}
-
-function filenameFromMime(mime) {
-  return /png/i.test(mime) ? 'input.png' : 'input.jpg'
-}
-
-async function sleep(ms) {
-  await new Promise((r) => setTimeout(r, ms))
-}
-
 async function safeJson(res) {
   const t = await res.text().catch(() => '')
   try {
@@ -96,223 +69,131 @@ async function safeJson(res) {
   }
 }
 
-async function fetchBytes(url, ua) {
-  const r = await fetchFn(url, { method: 'GET', headers: { 'User-Agent': ua || 'Mozilla/5.0' } })
-  if (!r.ok) return { ok: false, status: r.status, statusText: r.statusText, body: await r.text().catch(() => '') }
-  const ab = await r.arrayBuffer()
-  const ct = r.headers.get('content-type') || 'application/octet-stream'
-  return { ok: true, contentType: ct, bytes: Buffer.from(ab) }
+function extFromMime(mime) {
+  if (/png/i.test(mime)) return 'png'
+  if (/webp/i.test(mime)) return 'webp'
+  return 'jpg'
 }
 
-async function pollJob(API, baseHeaders, jobId, pollIntervalMs, timeoutMs) {
-  const started = Date.now()
-  let last = null
+function runFfmpeg(args, timeoutMs = 60000) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let err = ''
+    const t = setTimeout(() => {
+      try {
+        p.kill('SIGKILL')
+      } catch {}
+      reject(new Error('ffmpeg timeout'))
+    }, timeoutMs)
 
-  while (Date.now() - started < timeoutMs) {
-    const r = await fetchFn(`${API}/api/image-upscaler/v1/universal_upscale/get-job/${encodeURIComponent(jobId)}`, {
-      method: 'GET',
-      headers: baseHeaders
+    p.stderr.on('data', (d) => (err += d.toString()))
+    p.on('error', (e) => {
+      clearTimeout(t)
+      reject(e)
     })
-    const j = await safeJson(r)
-    last = j
+    p.on('close', (code) => {
+      clearTimeout(t)
+      if (code === 0) return resolve(true)
+      reject(new Error(err || `ffmpeg failed (${code})`))
+    })
+  })
+}
 
-    if (j?.code === 100000 && j?.result?.output_url?.length) return { done: true, data: j }
-    if (j?.result?.input_url) return { done: true, data: j }
-    if (j?.code && j.code !== 300006 && j.code !== 100000) return { done: true, data: j }
+async function webpToPngWithFfmpeg(webpBuf, tmpDir) {
+  const inPath = path.join(tmpDir, `vi_${Date.now()}_${Math.random().toString(16).slice(2)}.webp`)
+  const outPath = path.join(tmpDir, `vi_${Date.now()}_${Math.random().toString(16).slice(2)}.png`)
 
-    await sleep(pollIntervalMs)
+  await fsp.writeFile(inPath, webpBuf)
+
+  try {
+    await runFfmpeg(['-y', '-i', inPath, '-frames:v', '1', outPath], 60000)
+    const png = await fsp.readFile(outPath)
+    return { ok: true, png, inPath, outPath }
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e), inPath, outPath }
+  } finally {
+    try {
+      await fsp.unlink(inPath)
+    } catch {}
+    try {
+      await fsp.unlink(outPath)
+    } catch {}
   }
-
-  return { done: false, data: last }
 }
 
-async function createUploadNative(API, baseHeaders, buf, contentType, filename) {
-  const fd = new globalThis.FormData()
-  fd.set('original_image_file', new globalThis.Blob([buf], { type: contentType }), filename)
-
-  const r = await fetchFn(`${API}/api/image-upscaler/v2/upscale/create-job`, {
-    method: 'POST',
-    headers: baseHeaders,
-    body: fd
-  })
-
-  const j = await safeJson(r)
-  return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
-}
-
-async function createUploadFallback(API, baseHeaders, tmpPath, contentType, filename) {
-  const fd = new FormDataPkg()
-  fd.append('original_image_file', fs.createReadStream(tmpPath), { filename, contentType })
-
-  const headers = { ...baseHeaders, ...fd.getHeaders() }
-
-  let length = null
-  try {
-    length = await new Promise((resolve, reject) => fd.getLength((err, len) => (err ? reject(err) : resolve(len))))
-  } catch {}
-  if (typeof length === 'number') headers['Content-Length'] = String(length)
-
-  const r = await fetchFn(`${API}/api/image-upscaler/v2/upscale/create-job`, {
-    method: 'POST',
-    headers,
-    body: fd
-  })
-
-  const j = await safeJson(r)
-  return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
-}
-
-async function createUpscaleNative(API, baseHeaders, cdnUrl, upscaleType, imageWidth, imageHeight) {
-  const fd = new globalThis.FormData()
-  fd.set('original_image_url', String(cdnUrl))
-  fd.set('upscale_type', String(upscaleType))
-  fd.set('image_width', String(imageWidth))
-  fd.set('image_height', String(imageHeight))
-
-  const r = await fetchFn(`${API}/api/image-upscaler/v2/universal-upscale-for-url/create-job`, {
-    method: 'POST',
-    headers: baseHeaders,
-    body: fd
-  })
-
-  const j = await safeJson(r)
-  return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
-}
-
-async function createUpscaleFallback(API, baseHeaders, cdnUrl, upscaleType, imageWidth, imageHeight) {
-  const fd = new FormDataPkg()
-  fd.append('original_image_url', String(cdnUrl))
-  fd.append('upscale_type', String(upscaleType))
-  fd.append('image_width', String(imageWidth))
-  fd.append('image_height', String(imageHeight))
-
-  const headers = { ...baseHeaders, ...fd.getHeaders() }
-
-  let length = null
-  try {
-    length = await new Promise((resolve, reject) => fd.getLength((err, len) => (err ? reject(err) : resolve(len))))
-  } catch {}
-  if (typeof length === 'number') headers['Content-Length'] = String(length)
-
-  const r = await fetchFn(`${API}/api/image-upscaler/v2/universal-upscale-for-url/create-job`, {
-    method: 'POST',
-    headers,
-    body: fd
-  })
-
-  const j = await safeJson(r)
-  return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
-}
-
-async function imgupscalerEnhance(inputBuf, inputMime, upscaleX) {
-  const API = 'https://api.imgupscaler.ai'
-  const ORIGIN = 'https://imgupscaler.ai'
-  const IMAGE_WIDTH = 2048
-  const IMAGE_HEIGHT = 2048
-  const POLL_INTERVAL_MS = 2000
+async function vectorinkEnhanceFromBuffer(inputBuf, inputMime) {
+  const API = 'https://us-central1-vector-ink.cloudfunctions.net/upscaleImage'
+  const ORIGIN = 'https://vectorink.io'
   const TIMEOUT_MS = 120000
-  const TIMEZONE = 'America/Guatemala'
   const UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
 
-  const PRODUCT_SERIAL = crypto
-    .createHash('md5')
-    .update(`imgup-${Date.now()}-${Math.random()}`)
-    .digest('hex')
-
-  const baseHeaders = {
-    Accept: '*/*',
-    Origin: ORIGIN,
-    Referer: `${ORIGIN}/`,
-    'User-Agent': UA,
-    'product-serial': PRODUCT_SERIAL,
-    timezone: TIMEZONE
-  }
-
   const out = {
     ok: false,
-    provider: 'imgupscaler.ai',
-    upscale_x: upscaleX,
-    params: { image_width: IMAGE_WIDTH, image_height: IMAGE_HEIGHT },
-    meta: { product_serial: PRODUCT_SERIAL, timezone: TIMEZONE }
+    provider: 'vectorink.io',
+    meta: { request_id: crypto.randomUUID?.() || crypto.randomBytes(16).toString('hex') }
   }
 
-  const tmpDir = path.join(os.tmpdir(), 'imgupscaler')
-  const tmpPath = path.join(tmpDir, `img_${Date.now()}_${Math.random().toString(16).slice(2)}_${filenameFromMime(inputMime)}`)
+  const tmpDir = path.join(os.tmpdir(), 'vectorink')
+  const tmpPath = path.join(tmpDir, `img_${Date.now()}_${Math.random().toString(16).slice(2)}.${extFromMime(inputMime)}`)
 
   try {
     await fsp.mkdir(tmpDir, { recursive: true })
     await fsp.writeFile(tmpPath, inputBuf)
 
-    const upload = hasNativeMultipart()
-      ? await createUploadNative(API, baseHeaders, inputBuf, inputMime || 'image/jpeg', filenameFromMime(inputMime))
-      : await createUploadFallback(API, baseHeaders, tmpPath, inputMime || 'image/jpeg', filenameFromMime(inputMime))
+    const b64 = (await fsp.readFile(tmpPath)).toString('base64')
 
-    out.create_upload = upload.body
-    if (!upload.ok) {
-      out.error = { step: 'upload-create-job', status: upload.status, body: upload.body, code: upload.body?.code }
+    const r = await fetchFn(API, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: '*/*',
+        origin: ORIGIN,
+        referer: `${ORIGIN}/`,
+        'user-agent': UA
+      },
+      body: JSON.stringify({ data: { image: b64 } }),
+      signal: AbortSignal.timeout ? AbortSignal.timeout(TIMEOUT_MS) : undefined
+    })
+
+    const j = await safeJson(r)
+    if (!r.ok) {
+      out.error = { step: 'request', status: r.status, body: j }
       return out
     }
 
-    out.upload_job_id = upload.job_id
-
-    const polledUpload = await pollJob(API, baseHeaders, upload.job_id, POLL_INTERVAL_MS, TIMEOUT_MS)
-    out.upload_status = polledUpload.data
-
-    if (!polledUpload.done) {
-      out.error = { step: 'poll-upload-job', message: 'timeout', timeoutMs: TIMEOUT_MS }
+    const innerText = j?.result
+    if (typeof innerText !== 'string' || innerText.length < 10) {
+      out.error = { step: 'parse', code: 'no_result', body: j }
       return out
     }
 
-    const uploadResult = polledUpload.data?.result || {}
-    const cdnForUpscale = uploadResult?.output_url?.[0] || uploadResult?.input_url
-
-    if (!cdnForUpscale) {
-      out.error = { step: 'poll-upload-job', message: 'no_cdn_url', body: polledUpload.data, code: polledUpload.data?.code }
+    let inner
+    try {
+      inner = JSON.parse(innerText)
+    } catch {
+      out.error = { step: 'parse', code: 'bad_result_json', body: j }
       return out
     }
 
-    out.cdn_input_url = cdnForUpscale
-
-    const upscaleType = upscaleTypeFromX(upscaleX)
-
-    const job = hasNativeMultipart()
-      ? await createUpscaleNative(API, baseHeaders, cdnForUpscale, upscaleType, IMAGE_WIDTH, IMAGE_HEIGHT)
-      : await createUpscaleFallback(API, baseHeaders, cdnForUpscale, upscaleType, IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    out.create_upscale = job.body
-    if (!job.ok) {
-      out.error = { step: 'create-upscale-job', status: job.status, body: job.body, code: job.body?.code }
+    const webpB64 = inner?.image?.b64_json
+    if (!webpB64) {
+      out.error = { step: 'parse', code: 'no_b64', body: inner }
       return out
     }
 
-    out.upscale_job_id = job.job_id
+    const webpBuf = Buffer.from(webpB64, 'base64')
 
-    const polledUpscale = await pollJob(API, baseHeaders, job.job_id, POLL_INTERVAL_MS, TIMEOUT_MS)
-    out.status = polledUpscale.data
-
-    if (!polledUpscale.done) {
-      out.error = { step: 'poll-upscale-job', message: 'timeout', timeoutMs: TIMEOUT_MS }
-      return out
-    }
-
-    const result = polledUpscale.data?.result
-    const outputUrl = result?.output_url?.[0]
-    if (polledUpscale.data?.code !== 100000 || !outputUrl) {
-      out.error = { step: 'poll-upscale-job', message: 'job_not_success', body: polledUpscale.data, code: polledUpscale.data?.code }
-      return out
-    }
-
-    const file = await fetchBytes(outputUrl, UA)
-    if (!file.ok) {
-      out.error = { step: 'download-output', ...file }
+    const conv = await webpToPngWithFfmpeg(webpBuf, tmpDir)
+    if (!conv.ok) {
+      out.error = { step: 'convert', code: 'ffmpeg_failed', message: conv.error }
       return out
     }
 
     out.ok = true
-    out.result = { input_url: result?.input_url, output_url: result?.output_url }
-    out.buffer = file.bytes
-    out.contentType = file.contentType
+    out.buffer = conv.png
+    out.contentType = 'image/png'
+    out.result = { image_id: inner?.image?.image_id, created: inner?.created, credits: inner?.credits }
     return out
   } catch (e) {
     out.error = { step: 'exception', message: e?.message || String(e) }
