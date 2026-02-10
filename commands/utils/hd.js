@@ -8,7 +8,6 @@ import os from 'os'
 import path from 'path'
 
 const { fileTypeFromBuffer } = fileTypePkg
-
 const fetchFn = globalThis.fetch ? globalThis.fetch.bind(globalThis) : nodeFetch
 
 function hasNativeMultipart() {
@@ -80,6 +79,10 @@ function upscaleTypeFromX(x) {
   return '8'
 }
 
+function filenameFromMime(mime) {
+  return /png/i.test(mime) ? 'input.png' : 'input.jpg'
+}
+
 async function sleep(ms) {
   await new Promise((r) => setTimeout(r, ms))
 }
@@ -101,14 +104,14 @@ async function fetchBytes(url, ua) {
   return { ok: true, contentType: ct, bytes: Buffer.from(ab) }
 }
 
-async function pollJob(API, headers, jobId, pollIntervalMs, timeoutMs) {
+async function pollJob(API, baseHeaders, jobId, pollIntervalMs, timeoutMs) {
   const started = Date.now()
   let last = null
 
   while (Date.now() - started < timeoutMs) {
     const r = await fetchFn(`${API}/api/image-upscaler/v1/universal_upscale/get-job/${encodeURIComponent(jobId)}`, {
       method: 'GET',
-      headers
+      headers: baseHeaders
     })
     const j = await safeJson(r)
     last = j
@@ -123,11 +126,7 @@ async function pollJob(API, headers, jobId, pollIntervalMs, timeoutMs) {
   return { done: false, data: last }
 }
 
-function filenameFromMime(mime) {
-  return /png/i.test(mime) ? 'input.png' : 'input.jpg'
-}
-
-async function createJobFromFileBufferNative(API, baseHeaders, buf, contentType, filename) {
+async function createUploadNative(API, baseHeaders, buf, contentType, filename) {
   const fd = new globalThis.FormData()
   fd.set('original_image_file', new globalThis.Blob([buf], { type: contentType }), filename)
 
@@ -141,7 +140,7 @@ async function createJobFromFileBufferNative(API, baseHeaders, buf, contentType,
   return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
 }
 
-async function createJobFromTmpFileFallback(API, baseHeaders, tmpPath, contentType, filename) {
+async function createUploadFallback(API, baseHeaders, tmpPath, contentType, filename) {
   const fd = new FormDataPkg()
   fd.append('original_image_file', fs.createReadStream(tmpPath), { filename, contentType })
 
@@ -163,7 +162,7 @@ async function createJobFromTmpFileFallback(API, baseHeaders, tmpPath, contentTy
   return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
 }
 
-async function createUpscaleFromCdnUrlNative(API, baseHeaders, cdnUrl, upscaleType, imageWidth, imageHeight) {
+async function createUpscaleNative(API, baseHeaders, cdnUrl, upscaleType, imageWidth, imageHeight) {
   const fd = new globalThis.FormData()
   fd.set('original_image_url', String(cdnUrl))
   fd.set('upscale_type', String(upscaleType))
@@ -180,7 +179,7 @@ async function createUpscaleFromCdnUrlNative(API, baseHeaders, cdnUrl, upscaleTy
   return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
 }
 
-async function createUpscaleFromCdnUrlFallback(API, baseHeaders, cdnUrl, upscaleType, imageWidth, imageHeight) {
+async function createUpscaleFallback(API, baseHeaders, cdnUrl, upscaleType, imageWidth, imageHeight) {
   const fd = new FormDataPkg()
   fd.append('original_image_url', String(cdnUrl))
   fd.append('upscale_type', String(upscaleType))
@@ -208,20 +207,18 @@ async function createUpscaleFromCdnUrlFallback(API, baseHeaders, cdnUrl, upscale
 async function imgupscalerEnhance(inputBuf, inputMime, upscaleX) {
   const API = 'https://api.imgupscaler.ai'
   const ORIGIN = 'https://imgupscaler.ai'
-
   const IMAGE_WIDTH = 2048
   const IMAGE_HEIGHT = 2048
   const POLL_INTERVAL_MS = 2000
   const TIMEOUT_MS = 120000
+  const TIMEZONE = 'America/Guatemala'
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
 
   const PRODUCT_SERIAL = crypto
     .createHash('md5')
     .update(`imgup-${Date.now()}-${Math.random()}`)
     .digest('hex')
-
-  const TIMEZONE = 'America/Guatemala'
-  const UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
 
   const baseHeaders = {
     Accept: '*/*',
@@ -247,44 +244,51 @@ async function imgupscalerEnhance(inputBuf, inputMime, upscaleX) {
     await fsp.mkdir(tmpDir, { recursive: true })
     await fsp.writeFile(tmpPath, inputBuf)
 
-    const uploadJob = hasNativeMultipart()
-      ? await createJobFromFileBufferNative(API, baseHeaders, inputBuf, inputMime || 'image/jpeg', filenameFromMime(inputMime))
-      : await createJobFromTmpFileFallback(API, baseHeaders, tmpPath, inputMime || 'image/jpeg', filenameFromMime(inputMime))
+    const upload = hasNativeMultipart()
+      ? await createUploadNative(API, baseHeaders, inputBuf, inputMime || 'image/jpeg', filenameFromMime(inputMime))
+      : await createUploadFallback(API, baseHeaders, tmpPath, inputMime || 'image/jpeg', filenameFromMime(inputMime))
 
-    out.create_upload = uploadJob.body
-    if (!uploadJob.ok) {
-      out.error = { step: 'upload-create-job', status: uploadJob.status, body: uploadJob.body, code: uploadJob.body?.code }
+    out.create_upload = upload.body
+    if (!upload.ok) {
+      out.error = { step: 'upload-create-job', status: upload.status, body: upload.body, code: upload.body?.code }
       return out
     }
 
-    out.upload_job_id = uploadJob.job_id
+    out.upload_job_id = upload.job_id
 
-    const polledUpload = await pollJob(API, baseHeaders, uploadJob.job_id, POLL_INTERVAL_MS, TIMEOUT_MS)
+    const polledUpload = await pollJob(API, baseHeaders, upload.job_id, POLL_INTERVAL_MS, TIMEOUT_MS)
     out.upload_status = polledUpload.data
 
-    const cdnInputUrl = polledUpload.data?.result?.input_url
-    if (!polledUpload.done || !cdnInputUrl) {
-      out.error = { step: 'poll-upload-job', message: 'no_cdn_input_url', body: polledUpload.data, code: polledUpload.data?.code }
+    if (!polledUpload.done) {
+      out.error = { step: 'poll-upload-job', message: 'timeout', timeoutMs: TIMEOUT_MS }
       return out
     }
 
-    out.cdn_input_url = cdnInputUrl
+    const uploadResult = polledUpload.data?.result || {}
+    const cdnForUpscale = uploadResult?.output_url?.[0] || uploadResult?.input_url
+
+    if (!cdnForUpscale) {
+      out.error = { step: 'poll-upload-job', message: 'no_cdn_url', body: polledUpload.data, code: polledUpload.data?.code }
+      return out
+    }
+
+    out.cdn_input_url = cdnForUpscale
 
     const upscaleType = upscaleTypeFromX(upscaleX)
 
-    const upscaleJob = hasNativeMultipart()
-      ? await createUpscaleFromCdnUrlNative(API, baseHeaders, cdnInputUrl, upscaleType, IMAGE_WIDTH, IMAGE_HEIGHT)
-      : await createUpscaleFromCdnUrlFallback(API, baseHeaders, cdnInputUrl, upscaleType, IMAGE_WIDTH, IMAGE_HEIGHT)
+    const job = hasNativeMultipart()
+      ? await createUpscaleNative(API, baseHeaders, cdnForUpscale, upscaleType, IMAGE_WIDTH, IMAGE_HEIGHT)
+      : await createUpscaleFallback(API, baseHeaders, cdnForUpscale, upscaleType, IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    out.create_upscale = upscaleJob.body
-    if (!upscaleJob.ok) {
-      out.error = { step: 'create-upscale-job', status: upscaleJob.status, body: upscaleJob.body, code: upscaleJob.body?.code }
+    out.create_upscale = job.body
+    if (!job.ok) {
+      out.error = { step: 'create-upscale-job', status: job.status, body: job.body, code: job.body?.code }
       return out
     }
 
-    out.upscale_job_id = upscaleJob.job_id
+    out.upscale_job_id = job.job_id
 
-    const polledUpscale = await pollJob(API, baseHeaders, upscaleJob.job_id, POLL_INTERVAL_MS, TIMEOUT_MS)
+    const polledUpscale = await pollJob(API, baseHeaders, job.job_id, POLL_INTERVAL_MS, TIMEOUT_MS)
     out.status = polledUpscale.data
 
     if (!polledUpscale.done) {
