@@ -1,80 +1,12 @@
 import fetch from 'node-fetch'
 import crypto from 'crypto'
 import FormData from 'form-data'
-import fileTypePkg from 'file-type'
 import { promises as fsp } from 'fs'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 
-const { fileTypeFromBuffer } = fileTypePkg
-
-export default {
-  command: ['hd', 'enhance', 'remini'],
-  category: 'utils',
-  run: async (client, m, args, usedPrefix, command) => {
-    try {
-      const q = m.quoted || m
-      const mime = q?.mimetype || q?.msg?.mimetype || ''
-
-      if (!mime) {
-        return m.reply(`《✧》 Responde a una *imagen* con:\n${usedPrefix + command} 2|4|8|16`)
-      }
-
-      if (!/^image\/(jpe?g|png)$/i.test(mime)) {
-        return m.reply(`《✧》 El formato *${mime || 'desconocido'}* no es compatible`)
-      }
-
-      const x = Number(args?.[0])
-      if (![2, 4, 8, 16].includes(x)) {
-        return m.reply(
-          `《✧》 Elige cuánto mejorar:\n${usedPrefix + command} 2\n${usedPrefix + command} 4\n${usedPrefix + command} 8\n${usedPrefix + command} 16`
-        )
-      }
-
-      const buffer = await q.download?.()
-      if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 10) {
-        return m.reply('《✧》 No se pudo descargar la imagen')
-      }
-
-      const ft = await safeFileType(buffer)
-      const inputMime = ft?.mime || mime || 'image/jpeg'
-      if (!/^image\/(jpe?g|png)$/i.test(inputMime)) {
-        return m.reply(`《✧》 El formato *${inputMime}* no es compatible`)
-      }
-
-      const result = await upscaleFromBuffer(buffer, inputMime, x)
-
-      if (!result?.ok || !result?.buffer) {
-        const msg =
-          result?.error?.message ||
-          result?.error?.step ||
-          result?.status?.code ||
-          result?.create_upload?.code ||
-          result?.create_upscale?.code ||
-          'error'
-        return m.reply(`《✧》 No se pudo *mejorar* la imagen (${msg})`)
-      }
-
-      await client.sendMessage(m.chat, { image: result.buffer, caption: null }, { quoted: m })
-    } catch (e) {
-      console.error(e)
-      await m.reply(
-        `> An unexpected error occurred while executing command *${usedPrefix + command}*. Please try again or contact support if the issue persists.\n> [Error: *${e?.message || String(e)}*]`
-      )
-    }
-  }
-}
-
-async function safeFileType(buf) {
-  try {
-    return await fileTypeFromBuffer(buf)
-  } catch {
-    return null
-  }
-}
-
-async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
+export async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
   const API = 'https://api.imgupscaler.ai'
   const ORIGIN = 'https://imgupscaler.ai'
   const IMAGE_WIDTH = 2048
@@ -89,7 +21,7 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
 
   function headers(extra = {}) {
     return {
-      Accept: '/',
+      Accept: '*/*',
       Origin: ORIGIN,
       Referer: `${ORIGIN}/`,
       'User-Agent':
@@ -130,7 +62,7 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
     return { ok: true, contentType: ct, bytes: Buffer.from(ab) }
   }
 
-  async function pollJob(jobId) {
+  async function pollUpscale(jobId) {
     const started = Date.now()
     let last = null
 
@@ -141,9 +73,10 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
       })
       const j = await safeJson(r)
       last = j
+
       if (j?.code === 100000 && j?.result?.output_url?.length) return { done: true, data: j }
-      if (j?.result?.input_url) return { done: true, data: j }
       if (j?.code && j.code !== 300006 && j.code !== 100000) return { done: true, data: j }
+
       await sleep(POLL_INTERVAL_MS)
     }
 
@@ -151,11 +84,10 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
   }
 
   function filenameFromMime(mime) {
-    if (/png/i.test(mime)) return 'input.png'
-    return 'input.jpg'
+    return /png/i.test(mime) ? 'input.png' : 'input.jpg'
   }
 
-  async function createJobFromTmpFile(tmpPath, contentType, filename) {
+  async function createUploadFromTmp(tmpPath, contentType, filename) {
     const fd = new FormData()
     fd.append('original_image_file', fs.createReadStream(tmpPath), { filename, contentType })
 
@@ -166,7 +98,7 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
     })
 
     const j = await safeJson(r)
-    return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j, job_id: j?.result?.job_id }
+    return { ok: r.ok && j?.code === 100000 && j?.result?.job_id, status: r.status, body: j }
   }
 
   async function createUpscaleFromCdnUrl(cdnUrl, upscaleType) {
@@ -202,20 +134,16 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
     await fsp.mkdir(tmpDir, { recursive: true })
     await fsp.writeFile(tmpPath, inputBuf)
 
-    const fileJob = await createJobFromTmpFile(tmpPath, inputMime || 'image/jpeg', filenameFromMime(inputMime))
-    out.create_upload = fileJob.body
-    if (!fileJob.ok) {
-      out.error = { step: 'upload-create-job', status: fileJob.status, body: fileJob.body }
+    const up = await createUploadFromTmp(tmpPath, inputMime || 'image/jpeg', filenameFromMime(inputMime))
+    out.create_upload = up.body
+    if (!up.ok) {
+      out.error = { step: 'upload-create-job', status: up.status, body: up.body }
       return out
     }
 
-    out.upload_job_id = fileJob.job_id
-
-    const polledUpload = await pollJob(fileJob.job_id)
-    out.upload_status = polledUpload.data
-    const cdnInputUrl = polledUpload.data?.result?.input_url
-    if (!polledUpload.done || !cdnInputUrl) {
-      out.error = { step: 'poll-upload-job', message: 'no_cdn_input_url', body: polledUpload.data }
+    const cdnInputUrl = up.body?.result?.input_url
+    if (!cdnInputUrl) {
+      out.error = { step: 'upload-create-job', message: 'no_input_url', body: up.body }
       return out
     }
 
@@ -231,18 +159,18 @@ async function upscaleFromBuffer(inputBuf, inputMime, upscaleX) {
 
     out.upscale_job_id = upscaleJob.job_id
 
-    const polledUpscale = await pollJob(upscaleJob.job_id)
-    out.status = polledUpscale.data
+    const polled = await pollUpscale(upscaleJob.job_id)
+    out.status = polled.data
 
-    if (!polledUpscale.done) {
+    if (!polled.done) {
       out.error = { step: 'poll-upscale-job', message: 'timeout', timeoutMs: TIMEOUT_MS }
       return out
     }
 
-    const result = polledUpscale.data?.result
+    const result = polled.data?.result
     const outputUrl = result?.output_url?.[0]
-    if (polledUpscale.data?.code !== 100000 || !outputUrl) {
-      out.error = { step: 'poll-upscale-job', message: 'job_not_success', body: polledUpscale.data }
+    if (polled.data?.code !== 100000 || !outputUrl) {
+      out.error = { step: 'poll-upscale-job', message: 'job_not_success', body: polled.data }
       return out
     }
 
