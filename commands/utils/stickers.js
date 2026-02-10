@@ -35,27 +35,41 @@ export default {
           const imgUrl = stickerUrls[i]
           const buffer = await downloadBuffer(imgUrl)
 
+          if (!buffer || buffer.length === 0) continue
+
           let webpBuffer = buffer
 
           if (!imgUrl.toLowerCase().endsWith('.webp')) {
-            const inFile = tmp(`in-${Date.now()}-${i}.img`)
+            let ext = path.extname(imgUrl).split('?')[0]
+            if (!ext || ext.length > 5) ext = '.png'
+            
+            const inFile = tmp(`in-${Date.now()}-${i}${ext}`)
             const outFile = tmp(`out-${Date.now()}-${i}.webp`)
 
             fs.writeFileSync(inFile, buffer)
 
-            await runFfmpeg([
-              '-y',
-              '-i', inFile,
-              '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
-              '-c:v', 'libwebp',
-              '-lossless', '1',
-              outFile
-            ])
-
-            webpBuffer = fs.readFileSync(outFile)
-
-            fs.unlinkSync(inFile)
-            fs.unlinkSync(outFile)
+            try {
+              await runFfmpeg([
+                '-y',
+                '-i', inFile,
+                '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
+                '-c:v', 'libwebp',
+                '-lossless', '1',
+                outFile
+              ])
+              
+              if (fs.existsSync(outFile)) {
+                webpBuffer = fs.readFileSync(outFile)
+              } else {
+                throw new Error('Output file not created')
+              }
+            } catch (err) {
+              console.error('FFmpeg Error:', err.message)
+              throw err
+            } finally {
+              if (fs.existsSync(inFile)) fs.unlinkSync(inFile)
+              if (fs.existsSync(outFile)) fs.unlinkSync(outFile)
+            }
           }
 
           const stickerPath = await writeExif(
@@ -85,7 +99,12 @@ const ensureTmp = () => {
 const runFfmpeg = (args) =>
   new Promise((resolve, reject) => {
     const p = spawn('ffmpeg', args)
-    p.on('close', code => code === 0 ? resolve() : reject(new Error('ffmpeg error')))
+    let stderr = ''
+    p.stderr.on('data', (chunk) => { stderr += chunk })
+    p.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(stderr || 'ffmpeg error'))
+    })
   })
 
 const downloadBuffer = async (url) => {
