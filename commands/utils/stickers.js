@@ -39,25 +39,29 @@ export default {
 
           let webpBuffer = buffer
 
+          // Si la URL no termina en .webp, convertimos (o si es animado y necesitamos estático)
           if (!imgUrl.toLowerCase().endsWith('.webp')) {
             let ext = path.extname(imgUrl).split('?')[0]
             if (!ext || ext.length > 5) ext = '.png'
-            
+
             const inFile = tmp(`in-${Date.now()}-${i}${ext}`)
             const outFile = tmp(`out-${Date.now()}-${i}.webp`)
 
             fs.writeFileSync(inFile, buffer)
 
             try {
+              // SOLUCIÓN: Agregado '-vframes', '1' para extraer solo el primer frame si es animado
+              // Esto evita el error de "skipping unsupported chunk: ANIM"
               await runFfmpeg([
                 '-y',
                 '-i', inFile,
+                '-vframes', '1', 
                 '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
                 '-c:v', 'libwebp',
                 '-lossless', '1',
                 outFile
               ])
-              
+
               if (fs.existsSync(outFile)) {
                 webpBuffer = fs.readFileSync(outFile)
               } else {
@@ -65,7 +69,8 @@ export default {
               }
             } catch (err) {
               console.error('FFmpeg Error:', err.message)
-              throw err
+              // Si falla FFmpeg, intentamos usar el buffer original si es webp
+              if (!imgUrl.toLowerCase().endsWith('.webp')) throw err
             } finally {
               if (fs.existsSync(inFile)) fs.unlinkSync(inFile)
               if (fs.existsSync(outFile)) fs.unlinkSync(outFile)
