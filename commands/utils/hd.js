@@ -1,5 +1,7 @@
+import fetch from 'node-fetch'
 import crypto from 'crypto'
-import { FormData, Blob } from 'undici'
+import FormData from 'form-data'
+import { fileTypeFromBuffer } from 'file-type'
 
 export default {
   command: ['hd', 'enhance', 'remini'],
@@ -22,7 +24,14 @@ export default {
         return m.reply('《✧》 No se pudo *descargar* la imagen')
       }
 
-      const result = await imgupscalerEnhanceFromBuffer(buffer, mime, x)
+      const ft = await safeFileType(buffer)
+      const inputMime = ft?.mime || mime || 'image/jpeg'
+
+      if (!/^image\/(jpe?g|png)$/i.test(inputMime)) {
+        return m.reply(`《✧》 El formato *${inputMime}* no es compatible`)
+      }
+
+      const result = await imgupscalerEnhanceFromBuffer(buffer, inputMime, x)
       if (!result?.ok) {
         const msg =
           result?.error?.message ||
@@ -90,6 +99,14 @@ async function safeJson(res) {
   }
 }
 
+async function safeFileType(buf) {
+  try {
+    return await fileTypeFromBuffer(buf)
+  } catch {
+    return null
+  }
+}
+
 async function pollJob(jobId, productSerial) {
   const started = Date.now()
   let last = null
@@ -121,13 +138,13 @@ function filenameFromMime(mime) {
 
 async function createJobFromFileBuffer(buf, contentType, filename, productSerial) {
   const fd = new FormData()
-  fd.set('original_image_file', new Blob([buf], { type: contentType }), filename)
+  fd.append('original_image_file', buf, { filename, contentType })
 
   const r = await fetch(
     `https://api.imgupscaler.ai/api/image-upscaler/v2/upscale/create-job`,
     {
       method: 'POST',
-      headers: imgupHeaders(productSerial),
+      headers: { ...imgupHeaders(productSerial), ...fd.getHeaders() },
       body: fd
     }
   )
@@ -143,16 +160,16 @@ async function createJobFromFileBuffer(buf, contentType, filename, productSerial
 
 async function createUpscaleFromCdnUrl(cdnUrl, upscaleType, imageWidth, imageHeight, productSerial) {
   const fd = new FormData()
-  fd.set('original_image_url', String(cdnUrl))
-  fd.set('upscale_type', String(upscaleType))
-  fd.set('image_width', String(imageWidth))
-  fd.set('image_height', String(imageHeight))
+  fd.append('original_image_url', String(cdnUrl))
+  fd.append('upscale_type', String(upscaleType))
+  fd.append('image_width', String(imageWidth))
+  fd.append('image_height', String(imageHeight))
 
   const r = await fetch(
     `https://api.imgupscaler.ai/api/image-upscaler/v2/universal-upscale-for-url/create-job`,
     {
       method: 'POST',
-      headers: imgupHeaders(productSerial),
+      headers: { ...imgupHeaders(productSerial), ...fd.getHeaders() },
       body: fd
     }
   )
