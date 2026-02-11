@@ -118,15 +118,22 @@ if (methodCodeQR) {
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(global.sessionName)
-  const { version, isLatest } = await fetchLatestBaileysVersion();
+  const { version, isLatest } = await fetchLatestBaileysVersion()
   const logger = pino({ level: "silent" })
+
   console.info = () => {}
   console.debug = () => {}
+
+  const browserDesc =
+    typeof Browsers?.macOS === 'function'
+      ? Browsers.macOS('Chrome')
+      : (Browsers?.macOS ?? ['macOS', 'Chrome', '10.15.7'])
+
   const clientt = makeWASocket({
     version,
     logger,
     printQRInTerminal: false,
-    browser: Browsers.macOS('Chrome'),
+    browser: browserDesc,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
