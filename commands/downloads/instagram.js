@@ -16,13 +16,7 @@ export default {
       if (!data) return m.reply('《✧》 No se pudo obtener el contenido.')
       const caption =
         `ㅤ۟∩　ׅ　★ ໌　ׅ　🅘𝖦 🅓ownload　ׄᰙ\n\n` +
-        `${data.title ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Usuario › ${data.title}\n` : ''}` +
-        `${data.caption ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Descripción › ${data.caption}\n` : ''}` +
-        `${data.like ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Likes › ${data.like}\n` : ''}` +
-        `${data.comment ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Comentarios › ${data.comment}\n` : ''}` +
-        `${data.views ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Vistas › ${data.views}\n` : ''}` +
-        `${data.duration ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Duración › ${data.duration}\n` : ''}` +
-        `${data.resolution ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Resolución › ${data.resolution}\n` : ''}` +
+        `${data.title ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Titulo › ${data.title}\n` : ''}` +
         `${data.format ? `𖣣ֶㅤ֯⌗ ❀  ⬭ Formato › ${data.format}\n` : ''}` +
         `𖣣ֶㅤ֯⌗ ❀  ⬭ *Enlace* › ${args[0]}`
       if (data.type === 'video') {
